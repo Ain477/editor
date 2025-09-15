@@ -1,0 +1,101 @@
+name: build-branch
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-branch
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Detect package manager and install dependencies
+        id: install
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f pnpm-lock.yaml ]; then
+            echo "Using pnpm"
+            corepack enable
+            corepack prepare pnpm@latest --activate
+            pnpm install --frozen-lockfile=false
+            echo "build_cmd=pnpm build" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo "Using npm (lockfile)"
+            npm ci
+            echo "build_cmd=npm run build" >> "$GITHUB_OUTPUT"
+          else
+            echo "Using npm (no lockfile)"
+            npm install
+            echo "build_cmd=npm run build" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build package
+        run: ${{ steps.install.outputs.build_cmd }}
+
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ ! -d dist ]; then
+            echo "dist/ not found after build. Ensure your build produces dist/"
+            exit 1
+          fi
+
+          rm -rf .gh-build
+          mkdir -p .gh-build
+          cp -r dist .gh-build/
+
+          # Always include package.json. README and LICENSE are optional.
+          cp package.json .gh-build/
+          [ -f README.md ] && cp README.md .gh-build/ || true
+          [ -f LICENSE ] && cp LICENSE .gh-build/ || true
+
+      - name: Publish build branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create or reset the 'build' branch as an orphan branch with only the artifacts
+          if git show-ref --quiet refs/heads/build; then
+            git checkout build
+            git rm -r . >/dev/null 2>&1 || true
+          else
+            git checkout --orphan build
+            rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          cp -r .gh-build/* .
+          git add -A
+
+          # If nothing changed, avoid failing the workflow
+          if git diff --cached --quiet; then
+            echo "No changes to commit; build branch already up to date."
+          else
+            git commit -m "Build artifacts from ${GITHUB_SHA}"
+          fi
+
+          git push -f origin build
