@@ -11,35 +11,43 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Setup Node (20.x) + pnpm
+      - name: Setup Node (20.x)
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-      - run: corepack enable
-      - run: corepack prepare pnpm@latest --activate
 
-      - name: Install deps (pnpm if lockfile exists, else npm)
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
         id: install
         shell: bash
         run: |
           set -euo pipefail
           if [ -f pnpm-lock.yaml ]; then
             echo "Using pnpm"
-            pnpm i --frozen-lockfile=false
+            pnpm install --frozen-lockfile=false
             echo "build_cmd=pnpm build" >> "$GITHUB_OUTPUT"
+          elif [ -f package-lock.json ]; then
+            echo "Using npm (lockfile)"
+            npm ci
+            echo "build_cmd=npm run build" >> "$GITHUB_OUTPUT"
           else
-            echo "Using npm"
-            npm ci || npm i
+            echo "Using npm (no lockfile)"
+            npm install
             echo "build_cmd=npm run build" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build
+      - name: Build package
         run: ${{ steps.install.outputs.build_cmd }}
 
       - name: Prepare publish folder
@@ -47,7 +55,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ ! -d dist ]; then
-            echo "dist/ not found after build"; exit 1
+            echo "dist/ not found after build"
+            exit 1
           fi
           rm -rf publish && mkdir -p publish
           cp -r dist publish/
@@ -55,7 +64,11 @@ jobs:
           [ -f README.md ] && cp README.md publish/ || true
           [ -f LICENSE ] && cp LICENSE publish/ || true
 
-      - name: Commit to build branch (artifacts only)
+      - name: Publish to build branch (artifacts only)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_SHA: ${{ github.sha }}
         shell: bash
         run: |
           set -euo pipefail
